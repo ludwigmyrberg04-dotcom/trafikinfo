@@ -8,7 +8,8 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+# Flera webhooks: en per rad (eller kommaseparerade) i hemligheten DISCORD_WEBHOOK_URL
+WEBHOOKS = [u.strip() for u in re.split(r"[\n,]+", os.environ["DISCORD_WEBHOOK_URL"]) if u.strip()]
 URL = "https://www.kollatrafiken.se/"
 # Valfritt: kommaseparerade ord, t.ex. "Göteborg,Västra Götalands län"
 KEYWORDS = [k.strip().lower() for k in os.getenv("FILTER_KEYWORDS", "").split(",") if k.strip()]
@@ -133,15 +134,28 @@ def make_embed(ev):
     }
 
 
-def send(payload):
+def send_one(webhook, payload):
     for _ in range(5):
-        r = requests.post(WEBHOOK, json=payload, timeout=20)
+        r = requests.post(webhook, json=payload, timeout=20)
         if r.status_code == 429:
             time.sleep(float(r.json().get("retry_after", 2)) + 0.5)
             continue
         r.raise_for_status()
         return
     raise RuntimeError("Discord rate limit, gav upp")
+
+
+def send(payload):
+    """Skickar till alla webhooks. Ett fel hos en stoppar inte de andra."""
+    ok = 0
+    for i, webhook in enumerate(WEBHOOKS, 1):
+        try:
+            send_one(webhook, payload)
+            ok += 1
+        except Exception as e:
+            print(f"Webhook {i} misslyckades: {e}")
+    if ok == 0:
+        raise RuntimeError("Ingen webhook fungerade")
 
 
 def run_once(state):
