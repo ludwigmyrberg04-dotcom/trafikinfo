@@ -14,6 +14,8 @@ URL = "https://www.kollatrafiken.se/"
 KEYWORDS = [k.strip().lower() for k in os.getenv("FILTER_KEYWORDS", "").split(",") if k.strip()]
 MAX_POSTS = 10
 FAIL_ALERT_AFTER = 3  # larma efter så här många misslyckade körningar i rad
+LOOP_SECONDS = int(os.getenv("LOOP_SECONDS", "0"))  # 0 = ett enda varv
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
 STATE = Path("state.json")
 HEADERS = {"User-Agent": "KollaTrafikenDiscordPoster/1.0 (privat)"}
 EVENT_RE = re.compile(r"/handelse/(\d+)")
@@ -80,21 +82,54 @@ def parse_events(html):
     return events
 
 
+# (sökord, emoji, färg) - först som matchar vinner
+TYPES = [
+    ("olycka med tungt", "🚛", 0xC0392B),
+    ("olycka", "🚨", 0xE74C3C),
+    ("avstängd", "⛔", 0xE74C3C),
+    ("avstängning", "⛔", 0xE74C3C),
+    ("brand", "🔥", 0xE74C3C),
+    ("vägarbete", "🚧", 0xF39C12),
+    ("bärgning", "🚛", 0x95A5A6),
+    ("haveri", "🚗", 0x95A5A6),
+    ("djur", "🦌", 0x2ECC71),
+    ("olja", "🛢️", 0x7F8C8D),
+    ("halka", "🧊", 0x5DADE2),
+    ("snö", "❄️", 0x5DADE2),
+    ("kö", "🚦", 0xE67E22),
+    ("faror", "⚠️", 0xF1C40F),
+    ("hinder", "⚠️", 0xF1C40F),
+]
+
+
+def classify(ev):
+    text = " ".join([ev["title"], ev["kind"], ev["text"]]).lower()
+    for word, emoji, color in TYPES:
+        if word in text:
+            return emoji, color
+    return "📢", 0x3498DB
+
+
 def make_embed(ev):
-    lower = (ev["title"] + " " + ev["kind"]).lower()
-    color = 0xE74C3C if "olycka" in lower else 0xF39C12 if "vägarbete" in lower else 0x3498DB
+    emoji, color = classify(ev)
+    status = ev["status"]
+    status_emoji = "✅" if "avslutad" in status.lower() else "🔴"
     fields = []
-    for name, key, inline in [("Typ", "kind", True), ("Status", "status", True),
-                              ("Tid", "time", True), ("Plats", "where", False)]:
-        if ev[key]:
-            fields.append({"name": name, "value": ev[key][:1024], "inline": inline})
+    if ev["kind"]:
+        fields.append({"name": "🏷️ Typ", "value": ev["kind"][:1024], "inline": True})
+    if status:
+        fields.append({"name": "📋 Status", "value": f"{status_emoji} {status}"[:1024], "inline": True})
+    if ev["time"]:
+        fields.append({"name": "🕒 Tid", "value": ev["time"][:1024], "inline": True})
+    if ev["where"]:
+        fields.append({"name": "📍 Plats", "value": ev["where"][:1024], "inline": False})
     return {
-        "title": ev["title"][:256],
+        "title": f"{emoji} {ev['title']}"[:256],
         "url": ev["url"],
         "color": color,
         "description": (ev["text"] or "—")[:4000],
         "fields": fields,
-        "footer": {"text": "Källa: kollatrafiken.se"},
+        "footer": {"text": "🚗 Källa: kollatrafiken.se"},
     }
 
 
@@ -109,25 +144,22 @@ def send(payload):
     raise RuntimeError("Discord rate limit, gav upp")
 
 
-def fail(state, message):
-    state["fails"] += 1
-    print(message, f"(misslyckade körningar i rad: {state['fails']})")
-    if state["fails"] == FAIL_ALERT_AFTER:
-        send({"username": "Trafikinfo", "content": f"⚠️ Boten har problem: {message}"})
-    save_state({**state, "seen": state["seen"] or []})
-    sys.exit(0)
-
-
-def main():
-    state = load_state()
+def run_once(state):
+    """Ett varv. Returnerar True om det gick bra."""
     try:
         r = requests.get(URL, headers=HEADERS, timeout=20)
         r.raise_for_status()
         events = parse_events(r.text)
+        problem = None if events else "Hittade inga händelser. Sidans HTML kan ha ändrats."
     except Exception as e:
-        fail(state, f"Kunde inte hämta kollatrafiken.se ({e})")
-    if not events:
-        fail(state, "Hittade inga händelser. Sidans HTML kan ha ändrats.")
+        events, problem = [], f"Kunde inte hämta kollatrafiken.se ({e})"
+
+    if problem:
+        state["fails"] += 1
+        print(problem, f"(misslyckade varv i rad: {state['fails']})")
+        if state["fails"] == FAIL_ALERT_AFTER:
+            send({"username": "Trafikinfo", "content": f"⚠️ Boten har problem: {problem}"})
+        return False
 
     if state["fails"] >= FAIL_ALERT_AFTER:
         send({"username": "Trafikinfo", "content": "✅ Boten fungerar igen."})
@@ -135,9 +167,8 @@ def main():
 
     if state["seen"] is None:  # första körningen: posta inget
         state["seen"] = [e["id"] for e in events]
-        save_state(state)
         print(f"Första körningen: {len(events)} händelser markerade som sedda.")
-        return
+        return True
 
     seen = set(state["seen"])
     new = [e for e in events if e["id"] not in seen]
@@ -156,8 +187,20 @@ def main():
 
     seen.update(e["id"] for e in new)
     state["seen"] = list(seen)
-    save_state(state)
-    print(f"Nya: {len(new)}, postade: {posted}")
+    if new:
+        print(f"Nya: {len(new)}, postade: {posted}")
+    return True
+
+
+def main():
+    state = load_state()
+    deadline = time.time() + LOOP_SECONDS
+    while True:
+        run_once(state)
+        save_state({**state, "seen": state["seen"] or []})
+        if time.time() + POLL_SECONDS >= deadline:
+            break
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
