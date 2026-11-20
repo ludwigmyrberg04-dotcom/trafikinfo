@@ -68,7 +68,9 @@ def parse_events(html):
         if not block:
             continue
         link, lines = block
-        lines = [l for l in lines if not l.startswith("Läs mer")]
+        # Ta bort länktexten ("Läs mer" + dold text "om Trafikmeddelande på E4")
+        link_texts = set(link.stripped_strings)
+        lines = [l for l in lines if l not in link_texts and not l.startswith("Läs mer")]
         href = link["href"]
         events.append({
             "id": EVENT_RE.search(href).group(1),
