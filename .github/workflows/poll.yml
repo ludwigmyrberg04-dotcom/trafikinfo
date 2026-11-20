@@ -15,7 +15,7 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +30,8 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           FILTER_KEYWORDS: ${{ vars.FILTER_KEYWORDS }}
+          LOOP_SECONDS: "270"
+          POLL_SECONDS: "30"
         run: python poster.py
 
       - name: Spara state
